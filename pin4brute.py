@@ -257,9 +257,6 @@ def send_pin(device, pin, initial_focus_hex):
         
         # Record screen and check for countdown or keypad
         screenshot = record_screen(pin_str)
-        print(screenshot)
-        print(os.path.exists(screenshot))
-
         if screenshot:
             delay = ocr_countdown(screenshot)
 
